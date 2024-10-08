@@ -1,21 +1,26 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"trinoli/internal"
 
 	"github.com/labstack/echo/v4"
-	_ "github.com/marcboeker/go-duckdb"
+	"github.com/marcboeker/go-duckdb"
 )
 
 const (
 	initialLimit = 1024
 	limitFactor  = 2
+	host         = "localhost"
+	port         = 1323
 )
 
 func queryResultsOfError(err error) internal.QueryResults {
@@ -43,12 +48,16 @@ func queryResultsOfError(err error) internal.QueryResults {
 	}
 }
 
-func queryResultsOfSuccess(columns []internal.Column, data [][]any) internal.QueryResults {
+func queryResultsOfSuccess(columns []internal.Column, data [][]any, nextUri *url.URL) internal.QueryResults {
+	var nextUriStr string
+	if nextUri != nil {
+		nextUriStr = nextUri.String()
+	}
 	return internal.QueryResults{
 		Id:               "",
 		InfoUri:          "",
 		PartialCancelUri: nil,
-		NextUri:          nil, // TODO: Generate nextUri
+		NextUri:          &nextUriStr,
 		Columns:          columns,
 		Data:             data,
 		Stats:            internal.StatementStats{},
@@ -60,38 +69,84 @@ func queryResultsOfSuccess(columns []internal.Column, data [][]any) internal.Que
 }
 
 func doQuery(db *sql.DB, c echo.Context, query string, limit int, offset int) error {
-	// TODO: Retrieve profiling info
-	// https://pkg.go.dev/github.com/marcboeker/go-duckdb@v1.8.1#ProfilingInfo
-	// duckdb.GetProfilingInfo(db)
-	// TODO: Is there a nicer way to do this?
+	// TODO: Is there a nicer way to LIMIT and OFFSET?
 	query = fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
-	println("query", query)
-	rows, err := db.QueryContext(c.Request().Context(), query)
+	conn, err := db.Conn(c.Request().Context())
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, queryResultsOfError(err))
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(c.Request().Context(), query)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, queryResultsOfError(err))
 	}
+	defer rows.Close()
+
 	columns, data, err := internal.RowsToJson(rows)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, queryResultsOfError(err))
 	}
-	return c.JSON(http.StatusOK, queryResultsOfSuccess(columns, data))
+
+	nextUri := c.Request().URL
+	if len(data) == limit {
+		query := nextUri.Query()
+		query.Set("offset", strconv.Itoa(offset+limit))
+		query.Set("limit", strconv.Itoa(limit))
+		nextUri.RawQuery = query.Encode()
+		// TODO
+		nextUri.Scheme = "http"
+		nextUri.Host = fmt.Sprintf("%s:%d", host, port)
+	} else {
+		nextUri = nil
+	}
+
+	// TODO: Add this profiling info to `StatementStats`
+	// info, err := duckdb.GetProfilingInfo(conn)
+	// if err != nil {
+	// 	return c.JSON(http.StatusInternalServerError, queryResultsOfError(err))
+	// }
+	// fmt.Printf("CPU time: %s\n", info.Metrics["CPU_TIME"])
+	// fmt.Printf("info.Metrics: %v\n", info.Metrics)
+
+	return c.JSON(http.StatusOK, queryResultsOfSuccess(columns, data, nextUri))
 }
 
-func main() {
-	duckdbConfig := map[string]string{
+func openDB(file string) (*sql.DB, error) {
+	config := map[string]string{
 		"access_mode":                  "READ_ONLY",
 		"autoinstall_known_extensions": "false",
 		"autoload_known_extensions":    "false",
 		"enable_external_access":       "false",
-		"lock_configuration":           "true",
 	}
-	configQuery := []string{}
-	for k, v := range duckdbConfig {
-		configQuery = append(configQuery, k+"="+v)
+	params := []string{}
+	for k, v := range config {
+		params = append(params, k+"="+v)
 	}
-	duckdbFile := "/mnt/c/Users/Leo/Code/mastr-export/bnetza_mastr_2024-09.duckdb1"
-	dataSourceName := duckdbFile + "?" + strings.Join(configQuery, "&")
-	db, err := sql.Open("duckdb", dataSourceName)
+	dsn := file + "?" + strings.Join(params, "&")
+	connector, err := duckdb.NewConnector(dsn, func(execer driver.ExecerContext) error {
+		queries := []string{
+			`PRAGMA enable_profiling = 'no_output'`,
+			// `PRAGMA profiling_mode = 'detailed'`,
+			// `SET lock_configuration = 'true'`,
+		}
+		for _, query := range queries {
+			_, err := execer.ExecContext(context.Background(), query, nil)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	db := sql.OpenDB(connector)
+	return db, nil
+}
+
+func main() {
+	db, err := openDB("/mnt/c/Users/Leo/Code/mastr-export/bnetza_mastr_2024-09.duckdb1")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -114,5 +169,5 @@ func main() {
 		query := c.QueryParam("query")
 		return doQuery(db, c, query, limit, offset)
 	})
-	e.Logger.Fatal(e.Start(":1323"))
+	e.Logger.Fatal(e.Start(fmt.Sprintf("%s:%d", host, port)))
 }

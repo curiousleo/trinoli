@@ -6,21 +6,22 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"trinoli/internal"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/marcboeker/go-duckdb"
 )
 
 const (
 	initialLimit = 1024
 	limitFactor  = 2
-	host         = "localhost"
-	port         = 1323
 )
 
 func queryResultsOfError(err error) internal.QueryResults {
@@ -68,7 +69,7 @@ func queryResultsOfSuccess(columns []internal.Column, data [][]any, nextUri *url
 	}
 }
 
-func doQuery(db *sql.DB, c echo.Context, query string, limit int, offset int) error {
+func doQuery(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) error {
 	// TODO: Is there a nicer way to LIMIT and OFFSET?
 	query = fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
 	conn, err := db.Conn(c.Request().Context())
@@ -95,8 +96,8 @@ func doQuery(db *sql.DB, c echo.Context, query string, limit int, offset int) er
 		query.Set("limit", strconv.Itoa(limit))
 		nextUri.RawQuery = query.Encode()
 		// TODO
-		nextUri.Scheme = "http"
-		nextUri.Host = fmt.Sprintf("%s:%d", host, port)
+		nextUri.Scheme = "https"
+		nextUri.Host = host
 	} else {
 		nextUri = nil
 	}
@@ -118,6 +119,8 @@ func openDB(file string) (*sql.DB, error) {
 		"autoinstall_known_extensions": "false",
 		"autoload_known_extensions":    "false",
 		"enable_external_access":       "false",
+		// TODO: Figure out how to combine this with profiling
+		"lock_configuration": "true",
 	}
 	params := []string{}
 	for k, v := range config {
@@ -126,7 +129,7 @@ func openDB(file string) (*sql.DB, error) {
 	dsn := file + "?" + strings.Join(params, "&")
 	connector, err := duckdb.NewConnector(dsn, func(execer driver.ExecerContext) error {
 		queries := []string{
-			`PRAGMA enable_profiling = 'no_output'`,
+			// `PRAGMA enable_profiling = 'no_output'`,
 			// `PRAGMA profiling_mode = 'detailed'`,
 			// `SET lock_configuration = 'true'`,
 		}
@@ -145,15 +148,58 @@ func openDB(file string) (*sql.DB, error) {
 	return db, nil
 }
 
+func slogLogger() echo.MiddlewareFunc {
+	// From https://echo.labstack.com/docs/middleware/logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	return (middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
+		LogStatus:   true,
+		LogURI:      true,
+		LogError:    true,
+		HandleError: true, // forwards error to the global error handler, so it can decide appropriate status code
+		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
+			if v.Error == nil {
+				logger.LogAttrs(context.Background(), slog.LevelInfo, "REQUEST",
+					slog.String("uri", v.URI),
+					slog.Int("status", v.Status),
+				)
+			} else {
+				logger.LogAttrs(context.Background(), slog.LevelError, "REQUEST_ERROR",
+					slog.String("uri", v.URI),
+					slog.Int("status", v.Status),
+					slog.String("err", v.Error.Error()),
+				)
+			}
+			return nil
+		},
+	}))
+}
+
+func mustEnv(key string) string {
+	val, ok := os.LookupEnv(key)
+	if !ok {
+		log.Fatalf("required environment variable not found: %s", key)
+	}
+	return val
+}
+
 func main() {
-	db, err := openDB("/mnt/c/Users/Leo/Code/mastr-export/bnetza_mastr_2024-09.duckdb1")
+	// TODO: Use a proper argument parser
+	duckdbFile := mustEnv("DUCKDB_FILE")
+	bindHost := mustEnv("BIND_HOST")
+	externalHost := mustEnv("EXTERNAL_HOST")
+
+	db, err := openDB(duckdbFile)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
 	e := echo.New()
+	e.Use(slogLogger())
+	e.Use(middleware.CORS())
+
 	e.POST("/v1/statement", func(c echo.Context) error {
-		return doQuery(db, c, c.FormValue("query"), initialLimit, 0)
+		return doQuery(db, c, externalHost, c.FormValue("query"), initialLimit, 0)
 	})
 	e.GET("/fetch", func(c echo.Context) error {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -167,7 +213,7 @@ func main() {
 		}
 
 		query := c.QueryParam("query")
-		return doQuery(db, c, query, limit, offset)
+		return doQuery(db, c, externalHost, query, limit, offset)
 	})
-	e.Logger.Fatal(e.Start(fmt.Sprintf("%s:%d", host, port)))
+	e.Logger.Fatal(e.Start(bindHost))
 }

@@ -79,6 +79,8 @@ func queryResultsOfSuccess(columns []internal.Column, data [][]any, nextUri *url
 }
 
 func doQueryInternal(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) error {
+	// TODO: Is there a nicer way to LIMIT and OFFSET?
+	limitOffsetQuery := fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
 	logger.Info("doQueryInternal", "query", query)
 	conn, err := db.Conn(c.Request().Context())
 	if err != nil {
@@ -86,7 +88,7 @@ func doQueryInternal(db *sql.DB, c echo.Context, host string, query string, limi
 	}
 	defer conn.Close()
 
-	rows, err := conn.QueryContext(c.Request().Context(), query)
+	rows, err := conn.QueryContext(c.Request().Context(), limitOffsetQuery)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, queryResultsOfError(err))
 	}
@@ -150,8 +152,6 @@ func doQuery(db *sql.DB, c echo.Context, host string, query string, limit int, o
 	if ok {
 		return err
 	}
-	// TODO: Is there a nicer way to LIMIT and OFFSET?
-	query = fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
 	return doQueryInternal(db, c, host, query, limit, offset)
 }
 

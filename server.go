@@ -99,10 +99,11 @@ func doQueryInternal(db *sql.DB, c echo.Context, host string, query string, limi
 
 	nextUri := c.Request().URL
 	if len(data) == limit {
-		query := nextUri.Query()
-		query.Set("offset", strconv.Itoa(offset+limit))
-		query.Set("limit", strconv.Itoa(limit))
-		nextUri.RawQuery = query.Encode()
+		q := nextUri.Query()
+		q.Set("offset", strconv.Itoa(offset+limit))
+		q.Set("limit", strconv.Itoa(limit))
+		q.Set("query", query)
+		nextUri.RawQuery = q.Encode()
 		// TODO
 		nextUri.Scheme = "https"
 		nextUri.Host = host
@@ -246,7 +247,7 @@ func main() {
 		}
 		return doQuery(db, c, externalHost, body.String(), initialLimit, 0)
 	})
-	e.GET("/fetch", func(c echo.Context) error {
+	e.GET("/v1/statement", func(c echo.Context) error {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, queryResultsOfError(err))

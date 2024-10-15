@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"trinoli/internal"
@@ -22,6 +24,13 @@ import (
 const (
 	initialLimit = 1024
 	limitFactor  = 2
+)
+
+var (
+	showCatalogs = regexp.MustCompile(`(?i)^\s*show\s+catalogs\s*$`)
+	showSchemas  = regexp.MustCompile(`(?i)^\s*show\s+schemas\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\s*$`)
+	showTables   = regexp.MustCompile(`(?i)^\s*show\s+tables\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\.(?<schema>[0-9A-Za-z_-]+)\s*$`)
+	logger       = slog.New(slog.NewTextHandler(os.Stdout, nil))
 )
 
 func queryResultsOfError(err error) internal.QueryResults {
@@ -69,9 +78,8 @@ func queryResultsOfSuccess(columns []internal.Column, data [][]any, nextUri *url
 	}
 }
 
-func doQuery(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) error {
-	// TODO: Is there a nicer way to LIMIT and OFFSET?
-	query = fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
+func doQueryInternal(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) error {
+	logger.Info("doQueryInternal", "query", query)
 	conn, err := db.Conn(c.Request().Context())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, queryResultsOfError(err))
@@ -113,6 +121,39 @@ func doQuery(db *sql.DB, c echo.Context, host string, query string, limit int, o
 	return c.JSON(http.StatusOK, queryResultsOfSuccess(columns, data, nextUri))
 }
 
+func fakeTrinodbCompatibility(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) (error, bool) {
+	m := showCatalogs.FindStringSubmatch(query)
+	if m != nil {
+		query := `SELECT DISTINCT catalog_name as Catalog FROM information_schema.schemata`
+		return doQueryInternal(db, c, host, query, limit, offset), true
+	}
+	m = showSchemas.FindStringSubmatch(query)
+	if m != nil {
+		catalog := m[1]
+		// TODO: Use actual parameters here instead of string interpolation
+		query := fmt.Sprintf(`SELECT DISTINCT schema_name as Schema FROM information_schema.schemata WHERE catalog_name = '%s'`, catalog)
+		return doQueryInternal(db, c, host, query, limit, offset), true
+	}
+	m = showTables.FindStringSubmatch(query)
+	if m != nil {
+		catalog := m[1]
+		schema := m[2]
+		query := fmt.Sprintf(`SELECT table_name AS Table FROM information_schema.tables WHERE table_catalog = '%s' and table_schema = '%s'`, catalog, schema)
+		return doQueryInternal(db, c, host, query, limit, offset), true
+	}
+	return nil, false
+}
+
+func doQuery(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) error {
+	err, ok := fakeTrinodbCompatibility(db, c, host, query, limit, offset)
+	if ok {
+		return err
+	}
+	// TODO: Is there a nicer way to LIMIT and OFFSET?
+	query = fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", query, limit, offset)
+	return doQueryInternal(db, c, host, query, limit, offset)
+}
+
 func openDB(file string) (*sql.DB, error) {
 	config := map[string]string{
 		"access_mode":                  "READ_ONLY",
@@ -150,7 +191,6 @@ func openDB(file string) (*sql.DB, error) {
 
 func slogLogger() echo.MiddlewareFunc {
 	// From https://echo.labstack.com/docs/middleware/logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	return (middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 		LogStatus:   true,
 		LogURI:      true,
@@ -199,7 +239,12 @@ func main() {
 	e.Use(middleware.CORS())
 
 	e.POST("/v1/statement", func(c echo.Context) error {
-		return doQuery(db, c, externalHost, c.FormValue("query"), initialLimit, 0)
+		body := new(strings.Builder)
+		_, err := io.Copy(body, c.Request().Body)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, queryResultsOfError(err))
+		}
+		return doQuery(db, c, externalHost, body.String(), initialLimit, 0)
 	})
 	e.GET("/fetch", func(c echo.Context) error {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))

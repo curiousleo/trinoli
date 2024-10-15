@@ -38,17 +38,14 @@ func RowsToJson(rows *sql.Rows) ([]Column, [][]any, error) {
 	}
 
 	n := len(columnTypes)
-	allNulls := allNulls(columnTypes)
-	data := [][]interface{}{}
+	data := [][]any{}
 
 	for rows.Next() {
-		var scanArgs []interface{}
-		scanArgs = append(scanArgs, allNulls...)
+		scanArgs := allNulls(columnTypes)
 		err := rows.Scan(scanArgs...)
 		if err != nil {
 			return nil, nil, err
 		}
-
 		data = append(data, scanArgs)
 	}
 

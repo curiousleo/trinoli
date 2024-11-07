@@ -14,7 +14,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"trinoli/internal"
+
+	"github.com/curiousleo/trinoli/internal"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"

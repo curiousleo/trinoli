@@ -1,4 +1,4 @@
-module trinoli
+module github.com/curiousleo/trinoli
 
 go 1.23.2
 

@@ -24,7 +24,6 @@ import (
 
 const (
 	initialLimit = 1024
-	limitFactor  = 2
 )
 
 var (

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	initialLimit = 1024
+	initialLimit = 8192
 )
 
 var (

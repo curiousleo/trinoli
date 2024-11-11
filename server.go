@@ -27,10 +27,13 @@ const (
 )
 
 var (
-	showCatalogs = regexp.MustCompile(`(?i)^\s*show\s+catalogs\s*$`)
-	showSchemas  = regexp.MustCompile(`(?i)^\s*show\s+schemas\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\s*$`)
-	showTables   = regexp.MustCompile(`(?i)^\s*show\s+tables\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\.(?<schema>[0-9A-Za-z_-]+)\s*$`)
-	logger       = slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// DESCRIBE is an alias for SHOW COLUMNS FROM: https://trino.io/docs/current/sql/describe.html
+	describeTable = regexp.MustCompile(`(?i)^\s*describe\s+(?<catalog>[0-9A-Za-z_-]+)\.(?<schema>[0-9A-Za-z_-]+)\.(?<table>[0-9A-Za-z_-]+)`)
+	showCatalogs  = regexp.MustCompile(`(?i)^\s*show\s+catalogs\s*$`)
+	showSchemas   = regexp.MustCompile(`(?i)^\s*show\s+schemas\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\s*$`)
+	showTables    = regexp.MustCompile(`(?i)^\s*show\s+tables\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\.(?<schema>[0-9A-Za-z_-]+)\s*$`)
+	showColumns   = regexp.MustCompile(`(?i)^\s*show\s+columns\s+from\s+(?<catalog>[0-9A-Za-z_-]+)\.(?<schema>[0-9A-Za-z_-]+)\.(?<table>[0-9A-Za-z_-]+)`)
+	logger        = slog.New(slog.NewTextHandler(os.Stdout, nil))
 )
 
 func queryResultsOfError(err error) internal.QueryResults {
@@ -125,23 +128,39 @@ func doQueryInternal(db *sql.DB, c echo.Context, host string, query string, limi
 }
 
 func fakeTrinodbCompatibility(db *sql.DB, c echo.Context, host string, query string, limit int, offset int) (error, bool) {
+	// TODO: Use actual parameters throughout this function instead of string interpolation
 	m := showCatalogs.FindStringSubmatch(query)
 	if m != nil {
+		logger.Info("fakeTrinodbCompatibility", "query", query)
 		query := `SELECT DISTINCT catalog_name as Catalog FROM information_schema.schemata`
 		return doQueryInternal(db, c, host, query, limit, offset), true
 	}
 	m = showSchemas.FindStringSubmatch(query)
 	if m != nil {
+		logger.Info("fakeTrinodbCompatibility", "query", query)
 		catalog := m[1]
-		// TODO: Use actual parameters here instead of string interpolation
 		query := fmt.Sprintf(`SELECT DISTINCT schema_name as Schema FROM information_schema.schemata WHERE catalog_name = '%s'`, catalog)
 		return doQueryInternal(db, c, host, query, limit, offset), true
 	}
 	m = showTables.FindStringSubmatch(query)
 	if m != nil {
+		logger.Info("fakeTrinodbCompatibility", "query", query)
 		catalog := m[1]
 		schema := m[2]
 		query := fmt.Sprintf(`SELECT table_name AS Table FROM information_schema.tables WHERE table_catalog = '%s' and table_schema = '%s'`, catalog, schema)
+		return doQueryInternal(db, c, host, query, limit, offset), true
+	}
+	// DESCRIBE is an alias for SHOW COLUMNS FROM, so process them in the same way
+	m = describeTable.FindStringSubmatch(query)
+	if m == nil {
+		m = showColumns.FindStringSubmatch(query)
+	}
+	if m != nil {
+		logger.Info("fakeTrinodbCompatibility", "query", query)
+		catalog := m[1]
+		schema := m[2]
+		table := m[3]
+		query := fmt.Sprintf(`SELECT column_name AS Column, data_type AS Type, NULL AS Extra, NULL AS Comment FROM information_schema.columns WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s'`, catalog, schema, table)
 		return doQueryInternal(db, c, host, query, limit, offset), true
 	}
 	return nil, false

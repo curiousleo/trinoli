@@ -259,7 +259,7 @@ func main() {
 	e.Use(slogLogger())
 	e.Use(middleware.CORS())
 	e.Use(echoprometheus.NewMiddleware("trinoli"))
-	e.GET("/_metrics", echoprometheus.NewHandler())
+	e.GET("/metrics", echoprometheus.NewHandler())
 
 	e.POST("/v1/statement", func(c echo.Context) error {
 		body := new(strings.Builder)

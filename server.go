@@ -17,6 +17,7 @@ import (
 
 	"github.com/curiousleo/trinoli/internal"
 
+	"github.com/labstack/echo-contrib/echoprometheus"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/marcboeker/go-duckdb"
@@ -257,6 +258,8 @@ func main() {
 	e := echo.New()
 	e.Use(slogLogger())
 	e.Use(middleware.CORS())
+	e.Use(echoprometheus.NewMiddleware("trinoli"))
+	e.GET("/_metrics", echoprometheus.NewHandler())
 
 	e.POST("/v1/statement", func(c echo.Context) error {
 		body := new(strings.Builder)
